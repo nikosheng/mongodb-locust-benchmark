@@ -23,7 +23,7 @@ def main():
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
         parser.error("Specify command after --")
-    directory = os.getenv("BENCH_RESULTS", "results")
+    directory = os.getenv("BENCH_RESULTS", "result")
     Path(directory).mkdir(parents=True, exist_ok=True)
     result = subprocess.run(command, check=False)
     destination = os.getenv("BENCH_GCS_PREFIX")

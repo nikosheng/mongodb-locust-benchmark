@@ -100,6 +100,6 @@ def config_hash(cfg):
 
 
 def output_dir():
-    path = Path(os.getenv("BENCH_RESULTS", "results"))
+    path = Path(os.getenv("BENCH_RESULTS", "result"))
     path.mkdir(parents=True, exist_ok=True)
     return path

@@ -43,7 +43,7 @@ def summarize(run):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("files", nargs="+", help="run-*.json files (shell glob accepted)")
-    parser.add_argument("--out", default="results/summary.csv")
+    parser.add_argument("--out", default="result/summary.csv")
     args = parser.parse_args()
     rows = [summarize(json.loads(Path(path).read_text())) for path in args.files]
     out = Path(args.out)

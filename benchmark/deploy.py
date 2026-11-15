@@ -19,7 +19,7 @@ def main():
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--partitions", type=int, default=8)
     parser.add_argument("--unsharded", action="store_true", help="Setup collections without sharding")
-    parser.add_argument("--out", default="results/deploy")
+    parser.add_argument("--out", default="result/deploy")
     args = parser.parse_args()
     if min(args.workers, args.users, args.partitions, args.spawn_rate) <= 0:
         parser.error("Workers, users, partitions, and spawn-rate must be positive")

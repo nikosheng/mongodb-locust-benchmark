@@ -20,7 +20,7 @@ def main():
         parser.error("repeats, users, and spawn-rate must be positive")
     if args.workers and args.repeats != 1:
         parser.error("Distributed repeats need fresh worker processes for each run; use --repeats 1")
-    root = Path(os.getenv("BENCH_RESULTS", "results"))
+    root = Path(os.getenv("BENCH_RESULTS", "result"))
     root.mkdir(parents=True, exist_ok=True)
     for _ in range(args.repeats):
         run_id = uuid.uuid4().hex[:12]
