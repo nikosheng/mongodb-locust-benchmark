@@ -46,10 +46,13 @@ export PROJECT=your-gcp-project
 export REGION=asia-east2
 export IMAGE="$REGION-docker.pkg.dev/$PROJECT/bench/mongo-locust:v1"
 
-gcloud builds submit --tag "$IMAGE" .
+# Authenticate Docker to Artifact Registry, then build locally and push directly.
+gcloud auth configure-docker "$REGION-docker.pkg.dev"
+docker buildx build --platform linux/amd64 --load --tag "$IMAGE" .
+docker push "$IMAGE"
 ```
 
-Use this same image for every target.
+The `bench` Docker repository must already exist in Artifact Registry in `$REGION`. Your account needs Artifact Registry Writer access to push, and the GKE node service account needs Artifact Registry Reader access to pull. If building on Apple Silicon for standard GKE nodes, `--platform linux/amd64` builds the compatible image. Use this same image for every target.
 
 ## 4. Generate identical target/scenario configurations
 

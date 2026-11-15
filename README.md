@@ -249,7 +249,7 @@ Restart workers for each distributed run. `benchmark.run --repeats N` supports l
 
 ## Deploy to GKE Autopilot
 
-Prerequisites: an existing Autopilot cluster, Artifact Registry repository, MongoDB network connectivity, `gcloud`, Docker/build service, and `kubectl`. Place generators in the same region as the database and keep routing comparable across targets. Use private connectivity where available.
+Prerequisites: an existing Autopilot cluster, Artifact Registry repository, MongoDB network connectivity, `gcloud`, Docker, and `kubectl`. Place generators in the same region as the database and keep routing comparable across targets. Use private connectivity where available.
 
 ### 1. Build an immutable image
 
@@ -257,10 +257,14 @@ Prerequisites: an existing Autopilot cluster, Artifact Registry repository, Mong
 export PROJECT=your-project
 export REGION=asia-east2
 export IMAGE="$REGION-docker.pkg.dev/$PROJECT/bench/mongo-locust:v1"
-gcloud builds submit --tag "$IMAGE" .
+
+# Authenticate Docker to Artifact Registry, then build locally and push directly.
+gcloud auth configure-docker "$REGION-docker.pkg.dev"
+docker buildx build --platform linux/amd64 --load --tag "$IMAGE" .
+docker push "$IMAGE"
 ```
 
-The image uses Python 3.12, installs pinned driver/Locust versions, runs as a non-root user, and creates `/results`. For long-term reproducibility, preserve an image digest and the installed dependency inventory with each campaign.
+The `bench` Docker repository must already exist in Artifact Registry in `$REGION`. Your account needs Artifact Registry Writer access to push, and the GKE node service account needs Artifact Registry Reader access to pull. If building on Apple Silicon for standard GKE nodes, `--platform linux/amd64` builds the compatible image. The image uses Python 3.12, installs pinned driver/Locust versions, runs as a non-root user, and creates `/results`. For long-term reproducibility, preserve an image digest and the installed dependency inventory with each campaign.
 
 ### 2. Namespace, connection secret, and config
 
