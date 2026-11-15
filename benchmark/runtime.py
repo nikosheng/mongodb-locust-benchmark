@@ -64,7 +64,7 @@ class Runtime:
             self.run_id = os.getenv("BENCH_RUN_ID") or uuid.uuid4().hex[:12]
             self.started_at = time.time()
             self.measurement_at = self.started_at + self.cfg["warmup_seconds"]
-            if self.cfg["scenario"] in {"adt", "combined"}:
+            if self.cfg["scenario"] == "adt":
                 b = self.cfg["batch"]
                 self.ledger = JobLedger(self.cfg["players"], self.cfg["player_id_base"], b["size"],
                                         b["lease_seconds"], b["max_attempts"])
@@ -99,7 +99,7 @@ class Runtime:
             self.client.admin.command("ping")
             seed = self.cfg["seed"] + self.assignment["rank"]
             self.work = Workloads(self.cfg, db, self.env.events, seed, self.run_id)
-            if self.cfg["scenario"] in {"adt", "combined"}:
+            if self.cfg["scenario"] == "adt":
                 for slot in range(self.cfg["batch"]["slots_per_worker"]):
                     self.slots[slot] = Queue()
                     self.greenlets.append(gevent.spawn(self.batch_slot, slot))
@@ -117,7 +117,7 @@ class Runtime:
             return
         slot = msg.data["slot"]
         job = None
-        if self.ledger and time.time() >= self.measurement_at + self.cfg["batch"]["delay_seconds"]:
+        if self.ledger and time.time() >= self.measurement_at:
             if self.batch_started is None:
                 self.batch_started = time.time()
             job = self.ledger.claim(f"{msg.node_id}:{slot}")
@@ -145,7 +145,7 @@ class Runtime:
                                d.get("counts"), d.get("error"))
 
     def batch_slot(self, slot):
-        gevent.sleep(max(0, self.measurement_at + self.cfg["batch"]["delay_seconds"] - time.time()))
+        gevent.sleep(max(0, self.measurement_at - time.time()))
         while not self.stopping:
             self.send("bench_claim", {"slot": slot})
             job = self.slots[slot].get()

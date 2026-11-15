@@ -35,7 +35,6 @@ Have these targets available:
 |---|---|
 | `s1` | Sharded cluster with one shard |
 | `s2` | Sharded cluster with two shards |
-| `s4` | Sharded cluster with four shards |
 
 Record each target's `mongos` connection URI. Use the same MongoDB version, replica count per shard, read/write concerns, index definitions, and comparable per-shard resources. This framework deploys load generators; it does not provision MongoDB.
 
@@ -66,8 +65,8 @@ base = yaml.safe_load(Path("config/production.yaml").read_text())
 out = Path("/tmp/mongodb-bench-configs")
 out.mkdir(parents=True, exist_ok=True)
 
-for label, shard_count in [("s1", 1), ("s2", 2), ("s4", 4)]:
-    for scenario in ["profile", "adt", "combined"]:
+for label, shard_count in [("s1", 1), ("s2", 2)]:
+    for scenario in ["profile", "adt"]:
         config = deepcopy(base)
         config["label"] = label
         config["shards"] = shard_count
@@ -157,13 +156,12 @@ Render the target config matching the desired scenario, then apply its config, w
 
 - **`profile`:** member-profile reads, updates, lookups, and bounded host lists.
 - **`adt`:** finite ADT computation and profile writeback across the configured patron population. The run stops after the batch completes or the run-time limit is reached.
-- **`combined`:** profile traffic before and during the ADT batch. This is the headline business scenario: compare profile latency while ADT runs and total ADT completion time.
 
-Allow enough time for ADT to finish in the `adt` and `combined` scenarios. An incomplete batch produces an invalid run.
+Run profile and ADT as separate scenarios. Allow enough time for ADT to finish; an incomplete batch produces an invalid run.
 
 ## 9. Repeat across shard counts and scenarios
 
-For each target (`s1`, `s2`, `s4`):
+For each target (`s1`, `s2`):
 
 1. Update `MONGO_URI` to that target's `mongos` endpoint, then update the Kubernetes Secret before launching that target's jobs:
 
@@ -175,7 +173,7 @@ For each target (`s1`, `s2`, `s4`):
 
 2. Set `TARGET` and the matching `CONFIG` file.
 3. Prepare and validate the same dataset settings.
-4. Run `profile`, `adt`, and `combined` scenarios.
+4. Run the `profile` and `adt` scenarios separately. Compare profile throughput at the same latency/error SLO, then compare ADT completion time.
 5. Use the same image, worker count, CPU/memory settings, offered load, and timing for comparable runs.
 6. Repeat important tests at least three times, alternating target order.
 7. Restore comparable mutable data state between repeats; rerun the deterministic loader outside the timed interval when appropriate.
@@ -188,7 +186,7 @@ After the run has finished, copy the master pod's `/results` directory to local 
 
 ```bash
 export TARGET=s1
-export SCENARIO=combined
+export SCENARIO=profile
 mkdir -p "result/$TARGET/$SCENARIO"
 
 MASTER_POD=$(kubectl -n mongo-bench get pods -l app=locust-master \
@@ -250,7 +248,7 @@ The JSON artifacts contain the config, Locust operation stats, ADT job results, 
 Compare:
 
 1. Successful profile throughput at the same latency/error SLO.
-2. Profile p95/p99 before and during ADT processing.
+2. Profile p95/p99 across the measured profile workload.
 3. ADT wall-clock completion time.
 4. Per-shard CPU, cache, storage latency, replication lag, and workload distribution.
 5. GKE worker CPU/throttling, memory, network, and restarts, to ensure Locust is not the bottleneck.
@@ -264,4 +262,4 @@ Batch speedup(N)      = ADT duration(1) / ADT duration(N)
 Scaling efficiency   = speedup(N) / N
 ```
 
-The strongest evidence for these use cases is increased sustainable profile throughput or shorter ADT completion time while preserving the same online latency/error objective during batch execution.
+The strongest evidence for these use cases is increased sustainable profile throughput at the customer's latency/error objective, or shorter ADT completion time, on the two-shard target. Compare total resources and cost as well as performance.

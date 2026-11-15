@@ -4,7 +4,6 @@ Benchmark **one shard versus multiple shards** using casino-shaped workloads:
 
 1. **Patron ADT precompute:** full-population finite jobs and targeted incremental refreshes.
 2. **Member profile single view:** targeted reads/updates, identity lookup journeys, and non-shard-key controls.
-3. **Combined:** profile serving while a finite ADT batch runs.
 
 One Locust master coordinates horizontally scalable workers on **GKE Autopilot**. Workers connect directly to MongoDB with PyMongo. The data generator reuses the profile schema builder in `generate_member_profile.py`. ADT aggregation and precompute workloads are implemented in this framework under `benchmark/`; they do not depend on a separate `adt_precompute.py` script.
 
@@ -24,7 +23,7 @@ One Locust master coordinates horizontally scalable workers on **GKE Autopilot**
                         │ private connection
                  MongoDB mongos endpoints
                         │
-               1 / 2 / 4 replica-set shards
+                    1 / 2 replica-set shards
 
      Master artifacts → local result/ or optional GCS
      MongoDB/Atlas + GKE monitoring → external metrics
@@ -69,7 +68,7 @@ Start with `config/smoke.yaml` or `config/production.yaml`. Missing keys inherit
 | Setting | Meaning |
 |---|---|
 | `label`, `shards` | Target label and declared shard count used in reporting; shard count does not provision MongoDB |
-| `scenario` | `profile`, `adt`, `combined`, `incremental`, or `ingest` |
+| `scenario` | `profile`, `adt`, `incremental`, or `ingest` |
 | `players`, `history_days`, `active_day_probability` | Dataset scale and patron activity density |
 | `seed`, `as_of` | Reproducible source data and fixed ADT cutoff |
 | `windows` | ADT windows, e.g. `[7, 30, 90, 180]` |
@@ -80,7 +79,6 @@ Start with `config/smoke.yaml` or `config/production.yaml`. Missing keys inherit
 | `profile_weights` | Relative operation weights; set unwanted default operations to `0` |
 | `batch.size` | Patrons per finite job / aggregation cursor batch size |
 | `batch.slots_per_worker` | Concurrent finite jobs per worker, separate from online users |
-| `batch.delay_seconds` | Delay after warmup before ADT starts; creates a measured online baseline |
 | `batch.mode` | `ids`: bounded `$in`; `range`: original range-based fan-out control |
 | `batch.writeback` | Include profile writes, or compute only |
 | `batch.lease_seconds`, `max_attempts` | Heartbeated job lease and bounded retries |
@@ -208,17 +206,6 @@ BENCH_SCENARIO=ingest python -m benchmark.run --config config/smoke.yaml --durat
 
 Incremental tasks aggregate one patron and write ADT, producing `BUSINESS adt.refresh_patron_e2e`. Ingestion upserts a patron-day at **`as_of + 1 day`**, outside the immutable ADT calculation window. This bounds dataset growth and exercises insert-then-update behavior; it is not an unlimited append-only event ingestion test. Reruns after the next-day records exist are update-dominant. Restore equivalent target state for fair comparisons.
 
-### Combined scenario
-
-```bash
-BENCH_SCENARIO=combined python -m benchmark.run --config config/production.yaml \
-  --users 200 --spawn-rate 20 --duration 30m
-```
-
-The production config warms for 300 seconds, measures online-only traffic for 120 seconds, then starts ADT. Online traffic continues through batch completion until the configured duration ends. Artifacts contain ADT start/end timestamps and five-second **cumulative** operation snapshots labeled online/during/after ADT. Use time-series Locust CSV data to calculate interval throughput; snapshots are not independent interval percentiles.
-
-The headline comparison is **profile p99 during ADT plus full ADT completion time**. Run long enough to finish ADT and observe an after-batch interval. Set `batch.delay_seconds` to change the measured pre-batch baseline.
-
 ### Concurrency versus scheduled arrival rate
 
 - **Concurrency:** `--users` is the total online user population, distributed across workers. More workers provide generator capacity, not automatically more offered load.
@@ -330,14 +317,15 @@ Pods initially request/limit 1 vCPU and 2 GiB RAM. Each worker runs one Python p
 
 ## Comparison procedure
 
-1. Prepare independent 1-, 2-, and 4-shard targets with equal **per-shard** resources, replica count, MongoDB version, indexes, and concerns. Route all through `mongos`.
+1. Prepare independent 1- and 2-shard targets with equal **per-shard** resources, replica count, MongoDB version, indexes, and concerns. Route all through `mongos`.
 2. Keep the exact dataset specification constant. Verify distribution and query targeting.
-3. Run uniform targeted profile reads, then updates, then the production-shaped mixed workload.
-4. Run incremental ADT, finite ADT, and combined scenarios.
-5. Sweep users or scheduled rate while preserving generator headroom. Fix worker count within each run.
-6. Repeat key points at least three times, alternate target order, and restore comparable mutable state.
-7. Collect MongoDB/Atlas CPU, cache eviction, storage latency/IOPS, replication lag, router CPU, and per-shard activity. Collect GKE CPU/throttling, memory, network, restarts, and effective resource allocations. These external metrics are not scraped automatically by this repository.
-8. Compare successful throughput **at the same SLO**, ADT completion time, and online latency during ADT. Include total resources and cost.
+3. Run the same production-shaped profile workload against each target, sweeping offered load to find sustainable throughput at the customer's latency/error SLO.
+4. Run the finite ADT scenario separately against each target and compare completion time.
+5. Run incremental ADT separately if it is representative of the customer's workload.
+6. Sweep users or scheduled rate while preserving generator headroom. Fix worker count within each run.
+7. Repeat key points at least three times, alternate target order, and restore comparable mutable state.
+8. Collect MongoDB/Atlas CPU, cache eviction, storage latency/IOPS, replication lag, router CPU, and per-shard activity. Collect GKE CPU/throttling, memory, network, restarts, and effective resource allocations. These external metrics are not scraped automatically by this repository.
+9. Compare successful throughput **at the same SLO** and ADT completion time. Include total resources and cost.
 
 Multiple equivalent shards add total hardware resources. An optional equal-budget scale-up comparison answers a separate economic question. Low-load point latency and single-document hotspot contention may not improve with sharding. Preserve range/card/host controls in the report to make routing tradeoffs visible.
 
@@ -368,7 +356,7 @@ For GKE runs, point the report command at the local copies, for example:
 python -m benchmark.report result/*/*/run-*.json --out result/summary.csv
 ```
 
-The report emits per-run CSV plus repeated-run median/min/max successful throughput and median ADT duration. It separates profile operations, incremental E2E operations, scheduler events, and component timings; it does not treat the sum of Locust request counts as business throughput. Worst per-operation p99 is reported rather than averaging percentiles. SLO evaluation applies the configured whole-measurement thresholds; use the time-series artifacts to analyze the specific during-ADT interval.
+The report emits per-run CSV plus repeated-run median/min/max successful throughput and median ADT duration. It separates profile operations, incremental E2E operations, scheduler events, and component timings; it does not treat the sum of Locust request counts as business throughput. Worst per-operation p99 is reported rather than averaging percentiles. SLO evaluation applies the configured whole-measurement thresholds.
 
 `valid` means the measurement completed without framework/incomplete-batch errors. `slo_pass` separately evaluates errors, configured latency/batch limits, and arrival shedding/completion. Arrival counters are periodic in distributed mode, so examine boundary samples before making strict completion claims. A valid run can fail its SLO.
 
@@ -377,7 +365,6 @@ Suggested presentation charts:
 - Sustainable successful profile ops/s versus shard count.
 - Profile p99 versus offered load.
 - ADT wall-clock duration versus shard count.
-- Profile p99 before/during/after ADT, aligned to batch timestamps.
 - Per-shard CPU/cache/I/O and throughput per dollar.
 
 ```text

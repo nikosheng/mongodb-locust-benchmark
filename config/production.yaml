@@ -1,7 +1,7 @@
 # Use exactly the same dataset settings for every target.
 label: production-s1
 shards: 1
-scenario: combined
+scenario: profile
 database: casino_bench
 players: 3000000
 history_days: 180
@@ -27,7 +27,6 @@ profile_weights:
   member_lookup: 5
   host_list: 5
 batch:
-  delay_seconds: 120
   size: 200
   slots_per_worker: 1
   lease_seconds: 300

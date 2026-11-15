@@ -50,7 +50,7 @@ class Work:
 
 def main():
     cfg = copy.deepcopy(DEFAULTS)
-    cfg.update(scenario="combined", players=23, warmup_seconds=0.3)
+    cfg.update(scenario="adt", players=23, warmup_seconds=0.3)
     cfg["batch"].update(size=5, slots_per_worker=2)
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))

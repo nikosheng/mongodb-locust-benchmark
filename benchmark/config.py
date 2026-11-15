@@ -33,7 +33,7 @@ DEFAULTS = {
               "read_concern": "local", "read_preference": "primary"},
     "profile_weights": {"read_full": 65, "update_contact": 15, "read_update": 10,
                         "member_lookup": 5, "host_list": 5},
-    "batch": {"size": 200, "slots_per_worker": 1, "lease_seconds": 300, "delay_seconds": 0,
+    "batch": {"size": 200, "slots_per_worker": 1, "lease_seconds": 300,
               "max_attempts": 3, "mode": "ids", "writeback": True},
     "load": {"mode": "concurrency", "rate": 100, "max_inflight_per_worker": 100},
 }
@@ -57,7 +57,7 @@ def load_config(path=None):
     for env, key in (("BENCH_LABEL", "label"), ("BENCH_SCENARIO", "scenario")):
         if os.getenv(env):
             cfg[key] = os.environ[env]
-    if cfg["scenario"] not in {"profile", "adt", "combined", "incremental", "ingest"}:
+    if cfg["scenario"] not in {"profile", "adt", "incremental", "ingest"}:
         raise ValueError("Unknown scenario")
     if not cfg["windows"] or any(w <= 0 for w in cfg["windows"]):
         raise ValueError("ADT windows must be positive")
@@ -65,8 +65,6 @@ def load_config(path=None):
         raise ValueError("players must be positive; history_days must cover all ADT windows")
     if cfg["denominator"] not in {"active", "window"}:
         raise ValueError("denominator must be active or window")
-    if cfg["batch"]["delay_seconds"] < 0:
-        raise ValueError("batch.delay_seconds must be nonnegative")
     if cfg["distribution"] not in {"uniform", "skewed", "hotspot"}:
         raise ValueError("Unknown distribution")
     if not 0 < cfg["hot_fraction"] <= 1 or not 0 <= cfg["hot_probability"] <= 1:
