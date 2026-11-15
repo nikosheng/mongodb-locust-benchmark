@@ -260,11 +260,11 @@ export IMAGE="$REGION-docker.pkg.dev/$PROJECT/bench/mongo-locust:v1"
 
 # Authenticate Docker to Artifact Registry, then build locally and push directly.
 gcloud auth configure-docker "$REGION-docker.pkg.dev"
-docker buildx build --platform linux/amd64 --load --tag "$IMAGE" .
+docker build --tag "$IMAGE" .
 docker push "$IMAGE"
 ```
 
-The `bench` Docker repository must already exist in Artifact Registry in `$REGION`. Your account needs Artifact Registry Writer access to push, and the GKE node service account needs Artifact Registry Reader access to pull. If building on Apple Silicon for standard GKE nodes, `--platform linux/amd64` builds the compatible image. The image uses Python 3.12, installs pinned driver/Locust versions, runs as a non-root user, and creates `/results`. For long-term reproducibility, preserve an image digest and the installed dependency inventory with each campaign.
+The `bench` Docker repository must already exist in Artifact Registry in `$REGION`. Your account needs Artifact Registry Writer access to push, and the GKE node service account needs Artifact Registry Reader access to pull. The Docker image is built for your machine's default platform. The image uses Python 3.12, installs pinned driver/Locust versions, runs as a non-root user, and creates `/results`. For long-term reproducibility, preserve an image digest and the installed dependency inventory with each campaign.
 
 ### 2. Namespace, connection secret, and config
 
