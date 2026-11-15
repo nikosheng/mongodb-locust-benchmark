@@ -1,0 +1,44 @@
+# Use exactly the same dataset settings for every target.
+label: production-s1
+shards: 1
+scenario: combined
+database: casino_bench
+players: 3000000
+history_days: 180
+active_day_probability: 0.2
+seed: 42
+as_of: '2026-11-01'
+windows: [7, 30, 90, 180]
+denominator: active
+warmup_seconds: 300
+distribution: skewed
+hot_fraction: 0.2
+hot_probability: 0.8
+mongo:
+  max_pool_size: 100
+  timeout_ms: 120000
+  write_concern: majority
+  read_concern: local
+  read_preference: primary
+profile_weights:
+  read_full: 65
+  update_contact: 15
+  read_update: 10
+  member_lookup: 5
+  host_list: 5
+batch:
+  delay_seconds: 120
+  size: 200
+  slots_per_worker: 1
+  lease_seconds: 300
+  max_attempts: 3
+  mode: ids
+  writeback: true
+load:
+  mode: concurrency
+  rate: 1000
+  max_inflight_per_worker: 200
+slo:
+  p99_ms: 100
+  max_error_rate: 0.001
+  batch_seconds: 3600

@@ -1,0 +1,35 @@
+# Run setup once before starting this indexed Job. Adjust partitions via completions.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-loader
+  namespace: mongo-bench
+spec:
+  completionMode: Indexed
+  completions: 8
+  parallelism: 8
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: loader
+          image: REGION-docker.pkg.dev/PROJECT/bench/mongo-locust:latest
+          command: [python, -m, benchmark.data]
+          args: [load, --partition, '$(JOB_COMPLETION_INDEX)', --partitions, '8', --identities]
+          env:
+            - name: JOB_COMPLETION_INDEX
+              valueFrom:
+                fieldRef: {fieldPath: "metadata.annotations['batch.kubernetes.io/job-completion-index']"}
+            - {name: BENCH_CONFIG, value: /config/benchmark.yaml}
+            - name: MONGO_URI
+              valueFrom:
+                secretKeyRef: {name: mongodb, key: uri}
+          resources:
+            requests: {cpu: '1', memory: 2Gi, ephemeral-storage: 1Gi}
+            limits: {cpu: '1', memory: 2Gi, ephemeral-storage: 1Gi}
+          volumeMounts:
+            - {name: config, mountPath: /config, readOnly: true}
+      volumes:
+        - name: config
+          configMap: {name: benchmark-config}

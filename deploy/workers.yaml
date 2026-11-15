@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: locust-worker
+  namespace: mongo-bench
+spec:
+  replicas: 4
+  selector:
+    matchLabels: {app: locust-worker}
+  template:
+    metadata:
+      labels: {app: locust-worker}
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: worker
+          image: REGION-docker.pkg.dev/PROJECT/bench/mongo-locust:latest
+          args: [locust, -f, locustfile.py, --worker, --master-host, locust-master]
+          env:
+            - name: BENCH_CONFIG
+              value: /config/benchmark.yaml
+            - name: MONGO_URI
+              valueFrom:
+                secretKeyRef: {name: mongodb, key: uri}
+          resources:
+            requests: {cpu: '1', memory: 2Gi, ephemeral-storage: 1Gi}
+            limits: {cpu: '1', memory: 2Gi, ephemeral-storage: 1Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: config, mountPath: /config, readOnly: true}
+      volumes:
+        - name: config
+          configMap: {name: benchmark-config}

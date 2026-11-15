@@ -1,0 +1,28 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-setup
+  namespace: mongo-bench
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: setup
+          image: REGION-docker.pkg.dev/PROJECT/bench/mongo-locust:latest
+          command: [python, -m, benchmark.data]
+          args: [setup, --sharded, --identities]
+          env:
+            - {name: BENCH_CONFIG, value: /config/benchmark.yaml}
+            - name: MONGO_URI
+              valueFrom:
+                secretKeyRef: {name: mongodb, key: uri}
+          resources:
+            requests: {cpu: '1', memory: 2Gi, ephemeral-storage: 1Gi}
+            limits: {cpu: '1', memory: 2Gi, ephemeral-storage: 1Gi}
+          volumeMounts:
+            - {name: config, mountPath: /config, readOnly: true}
+      volumes:
+        - name: config
+          configMap: {name: benchmark-config}
