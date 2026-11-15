@@ -122,7 +122,7 @@ Daily rows are unique by deterministic patron-day ID, with one row per active pa
 
 ## MongoDB preparation
 
-For a one-shard sharded cluster and each multi-shard cluster, connect through `mongos`:
+The benchmark comparison uses two independent clusters: a one-shard sharded cluster (`s1`) and a two-shard sharded cluster (`s2`). Connect to each through its own `mongos` endpoint. Shard the profile and daily collections by hashed `player_id`; shard the optional identity collection by hashed `lookup_key`:
 
 ```bash
 export MONGO_URI='mongodb+srv://USER:PASSWORD@TARGET/?retryWrites=true'
@@ -132,7 +132,9 @@ python -m benchmark.data validate --config config/production.yaml --samples 100
 python -m benchmark.data inspect --config config/production.yaml
 ```
 
-`setup` requires collection/index creation and sharding privileges. `inspect` needs access to storage statistics and explain commands. Workers need read/write access to the workload collections. Supply an appropriately privileged credential to setup rather than using worker access for administration.
+Run setup and load once on each cluster with identical data settings. The deterministic loader creates equivalent datasets, while the clusters remain isolated from each other's resource use. Reuse each cluster's dataset for its `profile` and `adt` runs. The config `shards` value is reporting metadata; the `MONGO_URI` chooses the actual cluster. `setup` requires collection/index creation and sharding privileges. `inspect` needs access to storage statistics and explain commands. Workers need read/write access to the workload collections. Supply an appropriately privileged credential to setup rather than using worker access for administration.
+
+For the complete GKE workflow, including generation of the four `s1`/`s2` profile/ADT configs and switching the Kubernetes MongoDB Secret between the independent clusters, follow [`docs/BENCHMARK_GUIDE.md`](docs/BENCHMARK_GUIDE.md). Each dataset is prepared and loaded once per cluster, not once per scenario.
 
 ### Shard keys and indexes
 
@@ -140,7 +142,7 @@ python -m benchmark.data inspect --config config/production.yaml
 - `player_daily_metrics`: `{player_id: "hashed"}`, plus `{player_id: 1, gaming_date: 1}`.
 - Optional `member_identity`: `{lookup_key: "hashed"}`.
 - Profiles retain the reference generator's representative secondary indexes and add `{primary_host_num: 1, is_vip: 1, player_id: 1}` for bounded host lists.
-- Unsharded setup creates equivalent hashed indexes to equalize index-maintenance overhead.
+- Both comparison targets use sharded collections; `s1` has one shard and `s2` has two. Confirm the `s2` collections are balanced across both shards before measurement.
 
 Wait for balancing/index builds to finish before measurements. Inspect document/byte distribution, not just chunk counts. `inspect` prints storage data and representative profile/ADT explains. Check non-shard-key and range controls separately with representative explains before interpreting them. Empty-collection distribution and administrative behavior vary by MongoDB version.
 
@@ -257,51 +259,48 @@ The `bench` Docker repository must already exist in Artifact Registry in `$REGIO
 
 ```bash
 kubectl apply -f deploy/namespace.yaml
-# Export MONGO_URI securely in your shell before creating the secret.
-kubectl -n mongo-bench create secret generic mongodb --from-literal=uri="$MONGO_URI"
 
-python -m benchmark.deploy --image "$IMAGE" --config config/production.yaml \
-  --workers 8 --users 200 --spawn-rate 20 --duration 30m \
-  --out result/deploy-s1
-kubectl apply -f result/deploy-s1/config.yaml
+export TARGET=s1                 # s1 or s2
+export SCENARIO=profile           # profile or adt
+export CONFIG="/tmp/mongodb-bench-configs/$TARGET-$SCENARIO.yaml"
+export OUT="result/deploy-$TARGET-$SCENARIO"
+export MONGO_URI='mongodb://USER:PASSWORD@TARGET-MONGOS/?authSource=admin'
+
+kubectl -n mongo-bench create secret generic mongodb \
+  --from-literal=uri="$MONGO_URI" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+python -m benchmark.deploy --image "$IMAGE" --config "$CONFIG" \
+  --workers 8 --users 200 --spawn-rate 20 --duration 30m --out "$OUT"
+kubectl apply -f "$OUT/config.yaml"
 ```
 
-The renderer writes concrete manifests, unique run ID, worker count, image, loader partitions, and master arguments. Add `--unsharded` only for an unsharded baseline; a one-shard sharded cluster uses the default sharded setup. The secret is managed independently and is not written into generated files.
+The renderer writes concrete manifests, unique run ID, worker count, image, loader partitions, and master arguments. Follow [`docs/BENCHMARK_GUIDE.md`](docs/BENCHMARK_GUIDE.md) to generate the four configs, set up and load each cluster once, and run all four target/scenario combinations. The default setup shards collections on both clusters; do not pass `--unsharded`. Switch `MONGO_URI` and update the Secret whenever changing clusters. The config `shards` value is reporting metadata; the Secret selects the target.
 
 ### 3. Prepare the data
 
 ```bash
-kubectl apply -f result/deploy-s1/setup.yaml
+kubectl apply -f "$OUT/setup.yaml"
 kubectl -n mongo-bench wait --for=condition=complete job/benchmark-setup --timeout=10m
-kubectl apply -f result/deploy-s1/loader.yaml
+kubectl apply -f "$OUT/loader.yaml"
 kubectl -n mongo-bench logs -f job/benchmark-loader
 kubectl -n mongo-bench wait --for=condition=complete job/benchmark-loader --timeout=24h
 ```
 
-The loader defaults to eight indexed partitions. Change `--partitions` in the renderer to change both Kubernetes completions and generator partitioning together. Run `validate` and `inspect` from an authorized environment with connectivity before measuring. Wait for balancing to settle.
+The loader defaults to eight indexed partitions. Change `--partitions` in the renderer to change both Kubernetes completions and generator partitioning together. Run setup/load once on `s1`, then switch the Secret to the independent `s2` cluster, delete the completed setup/loader Jobs, and run the same steps there. Run `validate` and `inspect` against each cluster before measuring; wait for balancing to settle and confirm the `s2` collections are distributed across both shards.
 
-### 4. Save GKE results to your local disk
-
-The default workflow stores results in `/results` inside the master pod. It does **not** upload to GCS unless you pass `--gcs-prefix`. After the benchmark finishes, copy the files to your computer before deleting the Job or pod. Run these commands on your local machine in the repository directory:
+### 4. Start and scale workers
 
 ```bash
-mkdir -p "result/$TARGET/$SCENARIO"
-MASTER_POD=$(kubectl -n mongo-bench get pods -l app=locust-master \
-  -o jsonpath='{.items[0].metadata.name}')
-kubectl -n mongo-bench cp "$MASTER_POD:/results/." "result/$TARGET/$SCENARIO/"
-```
-
-The files are now on your local disk under `result/<target>/<scenario>/`. Keep the completed master Job/pod until the copy succeeds. The `result/` folder is git-ignored to avoid committing benchmark artifacts. If you also want a cloud backup, optionally render the deployment with `--gcs-prefix gs://YOUR_BUCKET/PREFIX`; the GKE service account must have GCS write access.
-
-### 5. Start and scale workers
-
-```bash
-kubectl apply -f result/deploy-s1/workers.yaml
-kubectl apply -f result/deploy-s1/master.yaml
+# Remove the previous run's resources before applying the next run.
+kubectl -n mongo-bench delete job locust-master --ignore-not-found
+kubectl -n mongo-bench delete deployment locust-worker --ignore-not-found
+kubectl apply -f "$OUT/workers.yaml"
+kubectl apply -f "$OUT/master.yaml"
 kubectl -n mongo-bench logs -f job/locust-master
 ```
 
-The master waits up to 600 seconds for the configured worker count. Worker pods may be running while waiting for the master service; Locust registration, rather than Kubernetes pod readiness alone, determines test readiness.
+Repeat the manifest render/apply for each of the four target/scenario configs. Before changing targets, update the MongoDB Secret to the new cluster's `mongos` URI. The master waits up to 600 seconds for the configured worker count. Worker pods may be running while waiting for the master service; Locust registration, rather than Kubernetes pod readiness alone, determines test readiness.
 
 For a new 16-worker run, render a new run directory with `--workers 16`, delete the previous master Job and worker Deployment, apply the new config/workers/master manifests. Jobs have immutable pod templates; create fresh Jobs between runs. Keep dataset preparation Jobs unless reloading is intended.
 
@@ -314,6 +313,19 @@ kubectl -n mongo-bench scale deployment locust-worker --replicas=16
 Also update the next master's `--expect-workers` count. **Do not scale during a measured run.** Autopilot provisions node capacity for the pods; HPA is deliberately excluded from controlled benchmark runs.
 
 Pods initially request/limit 1 vCPU and 2 GiB RAM. Each worker runs one Python process. Calibrate worker CPU, event-loop lag, pool pressure, and network throughput; increase worker replicas before concluding the database is saturated. Monitor throttling and record effective resource requests after Autopilot admission. The master has a ClusterIP service on 5557 and 8089; headless mode does not start the UI. For interactive exploration remove `--headless`/headless-only arguments from a separate manifest and port-forward port 8089.
+
+### 5. Save GKE results to your local disk
+
+The default workflow stores results in `/results` inside the master pod. It does **not** upload to GCS unless you pass `--gcs-prefix`. After the benchmark finishes, copy the files to your computer before deleting the Job or pod. Run these commands on your local machine in the repository directory:
+
+```bash
+mkdir -p "result/$TARGET/$SCENARIO"
+MASTER_POD=$(kubectl -n mongo-bench get pods -l app=locust-master \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl -n mongo-bench cp "$MASTER_POD:/results/." "result/$TARGET/$SCENARIO/"
+```
+
+The files are now on your local disk under `result/<target>/<scenario>/`. Keep the completed master Job/pod until the copy succeeds. The `result/` folder is git-ignored to avoid committing benchmark artifacts. If you also want a cloud backup, optionally render the deployment with `--gcs-prefix gs://YOUR_BUCKET/PREFIX`; the GKE service account must have GCS write access.
 
 ## Comparison procedure
 
