@@ -41,6 +41,14 @@ def daily_rows(cfg, index):
 def setup(client, db, cfg, sharded, identities):
     if sharded and client.admin.command("hello").get("msg") != "isdbgrid":
         raise ValueError("--sharded requires a mongos connection")
+    expected_shards = cfg.get("shards", 1)
+    if sharded and expected_shards == 2:
+        actual_shards = len(client.admin.command("listShards")["shards"])
+        if actual_shards != expected_shards:
+            raise ValueError(
+                f"The config expects {expected_shards} shards, but mongos reports {actual_shards}; "
+                "connect to the intended two-shard cluster before setup"
+            )
     collections = [(cfg["profiles"], "player_id"), (cfg["daily"], "player_id")]
     if identities:
         collections.append((cfg["identities"], "lookup_key"))
@@ -50,8 +58,13 @@ def setup(client, db, cfg, sharded, identities):
         db[name].create_index([(key, "hashed")])  # equivalent index cost for unsharded baseline
         if sharded:
             namespace = f"{cfg['database']}.{name}"
-            # shardCollection is idempotent when already sharded with the same key.
-            client.admin.command({"shardCollection": namespace, "key": {key: "hashed"}})
+            command = {"shardCollection": namespace, "key": {key: "hashed"}}
+            if expected_shards == 2:
+                # Pre-split an empty hashed collection so both shards receive chunks
+                # before the loader starts inserting documents.
+                command["numInitialChunks"] = 4
+            # numInitialChunks only applies when initially sharding an empty collection.
+            client.admin.command(command)
     for spec in DEFAULT_INDEXES:
         db[cfg["profiles"]].create_index(list(spec.items()))
     db[cfg["profiles"]].create_index([("primary_host_num", 1), ("is_vip", 1), ("player_id", 1)])

@@ -2,14 +2,14 @@
 
 This guide compares a **one-shard sharded cluster (`s1`)** with a separate **two-shard sharded cluster (`s2`)**, using the same Locust image, dataset configuration, workload settings, and GKE worker resources.
 
-Both targets are independent clusters and must be accessed through their own `mongos` endpoint. The same database name can be used on each because they are separate clusters. The setup shards the profile and daily-metrics collections by hashed `player_id` (and the optional identity collection by hashed `lookup_key`) on both targets. The `s1` data therefore resides on its only shard; after balancing, `s2` data should be distributed across its two shards. The config `shards` value is reporting metadata and does not select a cluster or control placement.
+Both targets are independent clusters and must be accessed through their own `mongos` endpoint. The same database name can be used on each because they are separate clusters. The setup shards the profile and daily-metrics collections by hashed `player_id` (and the optional identity collection by hashed `lookup_key`) on both targets. The `s1` data therefore resides on its only shard; `s2` setup verifies that mongos sees two shards and requests four initial chunks per empty hashed collection so loading can distribute data across both. The config `shards` value records the expected shard count and controls this setup behavior; `MONGO_URI` selects the actual cluster.
 
 ## Where results are saved
 
 - Local benchmark runs save artifacts on the computer running Locust, in **`./result/`** by default. Each run gets its own directory, e.g. `result/<run-id>/`.
 - GKE runs initially save artifacts in **`/results` inside the master pod**. They are **not uploaded to GCS by default**.
-- After a GKE run completes, copy artifacts to this computer's `result/` folder with `kubectl cp` (Step 8). Keep the master pod until the copy succeeds.
-- GCS upload is optional and enabled only when `--gcs-prefix` is passed to the manifest renderer.
+- GCS upload is recommended for GKE and enabled when `--gcs-prefix` is passed to the manifest renderer (Step 8). Download the uploaded artifacts for local reporting.
+- Without GCS or persistent storage, files in a terminated container are generally not accessible using `kubectl cp`.
 - The repository `.gitignore` excludes `result/` so benchmark output is not committed accidentally.
 
 ## 1. Install and run smoke checks
@@ -92,7 +92,7 @@ kubectl -n mongo-bench create secret generic mongodb \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-Before preparing data or running a workload on a target, set `MONGO_URI` to that cluster's `mongos` endpoint and apply the Secret. Repeat when switching targets. Jobs read the Secret when they start; the config's `shards` field does not select the cluster.
+Before preparing data or running a workload on a target, set `MONGO_URI` to that cluster's `mongos` endpoint and apply the Secret. Repeat when switching targets. Jobs read the Secret when they start; the config's `shards` field does not select the cluster, but setup checks it against the actual shard count for the two-shard target.
 
 ## 6. Set up and load data once per cluster
 
@@ -128,7 +128,7 @@ kubectl -n mongo-bench wait \
   --for=condition=complete job/benchmark-loader --timeout=24h
 ```
 
-The setup uses hashed sharding and creates indexes on both clusters. The loader uses eight deterministic partitions by default. Data loading is outside the timed benchmark. When repeating the commands for `s2`, change `TARGET`, `CONFIG`, `OUT`, and `MONGO_URI` to the two-shard cluster. The data generator is deterministic, so both clusters receive equivalent datasets.
+The setup uses hashed sharding and creates indexes on both clusters. For `s2`, run setup on empty collections so the four initial hashed chunks can be distributed before data loading; rerunning setup does not repartition collections that are already sharded. The loader uses eight deterministic partitions by default. Data loading is outside the timed benchmark. When repeating the commands for `s2`, change `TARGET`, `CONFIG`, `OUT`, and `MONGO_URI` to the two-shard cluster. The data generator is deterministic, so both clusters receive equivalent datasets.
 
 Before preparing the second cluster, remove completed preparation jobs so Kubernetes can create them again with the new config:
 
@@ -153,6 +153,8 @@ Run `profile` and `adt` separately on each target, reusing the dataset loaded ab
 ```bash
 kubectl -n mongo-bench delete job locust-master --ignore-not-found
 kubectl -n mongo-bench delete deployment locust-worker --ignore-not-found
+# Wait until all previous worker pods disappear; press Ctrl+C when none remain.
+kubectl -n mongo-bench get pods -l app=locust-worker -w
 ```
 
 Repeat the Secret update and deployment render/apply commands for each target/scenario, using the matching `MONGO_URI`, `TARGET`, and `SCENARIO` values.
@@ -175,6 +177,7 @@ python -m benchmark.deploy \
   --users 200 \
   --spawn-rate 20 \
   --duration 30m \
+  --gcs-prefix "gs://YOUR_BUCKET/$TARGET/$SCENARIO" \
   --out "$OUT"
 
 kubectl apply -f "$OUT/config.yaml"
@@ -196,34 +199,9 @@ Run profile and ADT as separate scenarios. Allow enough time for ADT to finish; 
 
 For all four runs (`s1-profile`, `s1-adt`, `s2-profile`, `s2-adt`), use the same image, worker count, CPU/memory settings, offered load, and timing. Repeat important tests at least three times and alternate target order. Restore comparable mutable data state between repeats; profile updates and ADT writeback modify documents, so reload or otherwise reset the affected data outside the timed interval when needed. Do not run competing ADT writeback tests on the same collections concurrently.
 
-## 8. Copy GKE artifacts to your computer
+## 8. Save GKE artifacts to GCS
 
-After the run has finished, copy the master pod's `/results` directory to local `./result/`. Run this on your computer from the repository root, and set `TARGET` and `SCENARIO` to the completed run:
-
-```bash
-export TARGET=s1
-export SCENARIO=profile
-mkdir -p "result/$TARGET/$SCENARIO"
-
-MASTER_POD=$(kubectl -n mongo-bench get pods -l app=locust-master \
-  -o jsonpath='{.items[0].metadata.name}')
-
-kubectl -n mongo-bench cp \
-  "$MASTER_POD:/results/." \
-  "result/$TARGET/$SCENARIO/"
-```
-
-Confirm the copy before deleting the completed master Job/pod:
-
-```bash
-ls -la "result/$TARGET/$SCENARIO"
-```
-
-Repeat for every target and scenario. Local Locust runs already write directly beneath `result/`; they do not need `kubectl cp`.
-
-### Optional GCS backup
-
-By default, GKE does **not** upload artifacts to GCS. To also upload a backup, render the deployment with a GCS prefix:
+By default, GKE does **not** upload artifacts to GCS. For durable results, render the deployment with a GCS prefix before starting the run:
 
 ```bash
 python -m benchmark.deploy \
@@ -237,7 +215,24 @@ python -m benchmark.deploy \
   --out "$OUT"
 ```
 
-The GKE service account must have permission to write objects to the bucket. GCS is optional; the local `kubectl cp` procedure works without it.
+The bucket must exist and the `mongo-bench/benchmark` Kubernetes service account needs object-write permission through Workload Identity. For this cluster (`niko-feng`, project number `785680100598`), ask a bucket administrator to grant the service-account principal the bucket-scoped Object Creator role:
+
+```bash
+gcloud storage buckets add-iam-policy-binding gs://YOUR_BUCKET \
+  --member="principal://iam.googleapis.com/projects/785680100598/locations/global/workloadIdentityPools/niko-feng.svc.id.goog/subject/ns/mongo-bench/sa/benchmark" \
+  --role="roles/storage.objectCreator"
+```
+
+Replace `YOUR_BUCKET` with the bucket used by `--gcs-prefix`. For another project or cluster, change the project number and Workload Identity pool to match that cluster. `roles/storage.objectCreator` permits creating new objects but not overwriting them, so use a fresh run ID when retrying. The renderer appends a run ID. After Locust exits, the master uploads `/results` even if Locust returned an error; check its logs for `Uploaded ... artifact(s)` and verify the objects. If the pod is killed or upload fails, these files may be lost without persistent storage.
+
+Download the run directory (replace `RUN_ID` with the renderer's output):
+
+```bash
+mkdir -p "result/$TARGET/$SCENARIO"
+gcloud storage cp --recursive "gs://YOUR_BUCKET/$TARGET/$SCENARIO/RUN_ID/*" "result/$TARGET/$SCENARIO/"
+```
+
+Repeat for every run. Local Locust runs already write directly beneath `result/`.
 
 ## 9. Summarize local artifacts
 

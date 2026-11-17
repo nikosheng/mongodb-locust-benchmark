@@ -8,12 +8,17 @@ import sys
 
 def upload(directory, destination):
     from google.cloud import storage
+    if not destination.startswith("gs://") or not destination.removeprefix("gs://").partition("/")[0]:
+        raise ValueError("BENCH_GCS_PREFIX must be a gs://bucket[/prefix] URI")
     bucket_name, _, prefix = destination.removeprefix("gs://").partition("/")
     bucket = storage.Client().bucket(bucket_name)
+    count = 0
     for path in Path(directory).rglob("*"):
         if path.is_file():
             name = "/".join(part for part in (prefix.rstrip("/"), str(path.relative_to(directory))) if part)
             bucket.blob(name).upload_from_filename(str(path))
+            count += 1
+    print(f"Uploaded {count} artifact(s) to {destination}", flush=True)
 
 
 def main():

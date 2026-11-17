@@ -2,7 +2,8 @@ label: smoke-s1
 shards: 1
 scenario: profile
 players: 10000
-history_days: 180
+windows: [7]
+history_days: 7
 active_day_probability: 0.2
 as_of: '2026-11-01'
 warmup_seconds: 10

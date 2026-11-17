@@ -126,13 +126,14 @@ The benchmark comparison uses two independent clusters: a one-shard sharded clus
 
 ```bash
 export MONGO_URI='mongodb+srv://USER:PASSWORD@TARGET/?retryWrites=true'
-python -m benchmark.data setup --config config/production.yaml --sharded --identities
-python -m benchmark.data load --config config/production.yaml --identities
-python -m benchmark.data validate --config config/production.yaml --samples 100
-python -m benchmark.data inspect --config config/production.yaml
+export CONFIG=config/production.yaml  # use shards: 1 for s1; a target config with shards: 2 for s2
+python -m benchmark.data setup --config "$CONFIG" --sharded --identities
+python -m benchmark.data load --config "$CONFIG" --identities
+python -m benchmark.data validate --config "$CONFIG" --samples 100
+python -m benchmark.data inspect --config "$CONFIG"
 ```
 
-Run setup and load once on each cluster with identical data settings. The deterministic loader creates equivalent datasets, while the clusters remain isolated from each other's resource use. Reuse each cluster's dataset for its `profile` and `adt` runs. The config `shards` value is reporting metadata; the `MONGO_URI` chooses the actual cluster. `setup` requires collection/index creation and sharding privileges. `inspect` needs access to storage statistics and explain commands. Workers need read/write access to the workload collections. Supply an appropriately privileged credential to setup rather than using worker access for administration.
+Run setup and load once on each cluster with identical data settings. Use a config with `shards: 1` for `s1` and `shards: 2` for `s2`; `MONGO_URI` still chooses the actual cluster. For `s2`, setup verifies that mongos sees exactly two shards and requests four initial chunks for each empty hashed collection before loading, so both shards can receive data. `numInitialChunks` only applies when initially sharding an empty collection; existing sharded collections are not redistributed by rerunning setup. The deterministic loader creates equivalent datasets, while the clusters remain isolated from each other's resource use. Reuse each cluster's dataset for its `profile` and `adt` runs. `setup` requires collection/index creation and sharding privileges. `inspect` needs access to storage statistics and explain commands. Workers need read/write access to the workload collections. Supply an appropriately privileged credential to setup rather than using worker access for administration.
 
 For the complete GKE workflow, including generation of the four `s1`/`s2` profile/ADT configs and switching the Kubernetes MongoDB Secret between the independent clusters, follow [`docs/BENCHMARK_GUIDE.md`](docs/BENCHMARK_GUIDE.md). Each dataset is prepared and loaded once per cluster, not once per scenario.
 
@@ -271,7 +272,8 @@ kubectl -n mongo-bench create secret generic mongodb \
   --dry-run=client -o yaml | kubectl apply -f -
 
 python -m benchmark.deploy --image "$IMAGE" --config "$CONFIG" \
-  --workers 8 --users 200 --spawn-rate 20 --duration 30m --out "$OUT"
+  --workers 8 --users 200 --spawn-rate 20 --duration 30m \
+  --gcs-prefix "gs://YOUR_BUCKET/$TARGET/$SCENARIO" --out "$OUT"
 kubectl apply -f "$OUT/config.yaml"
 ```
 
@@ -295,6 +297,9 @@ The loader defaults to eight indexed partitions. Change `--partitions` in the re
 # Remove the previous run's resources before applying the next run.
 kubectl -n mongo-bench delete job locust-master --ignore-not-found
 kubectl -n mongo-bench delete deployment locust-worker --ignore-not-found
+# Wait until all previous worker pods disappear before starting new workers.
+kubectl -n mongo-bench get pods -l app=locust-worker -w
+# Press Ctrl+C once no worker pods remain.
 kubectl apply -f "$OUT/workers.yaml"
 kubectl apply -f "$OUT/master.yaml"
 kubectl -n mongo-bench logs -f job/locust-master
@@ -312,20 +317,28 @@ kubectl -n mongo-bench scale deployment locust-worker --replicas=16
 
 Also update the next master's `--expect-workers` count. **Do not scale during a measured run.** Autopilot provisions node capacity for the pods; HPA is deliberately excluded from controlled benchmark runs.
 
-Pods initially request/limit 1 vCPU and 2 GiB RAM. Each worker runs one Python process. Calibrate worker CPU, event-loop lag, pool pressure, and network throughput; increase worker replicas before concluding the database is saturated. Monitor throttling and record effective resource requests after Autopilot admission. The master has a ClusterIP service on 5557 and 8089; headless mode does not start the UI. For interactive exploration remove `--headless`/headless-only arguments from a separate manifest and port-forward port 8089.
+Benchmark pods (master, workers, setup, and loader) request/limit 2 vCPU and 4 GiB RAM each. Each worker runs one Python process, so total worker capacity scales with replica count. Calibrate worker CPU, event-loop lag, pool pressure, and network throughput; increase worker replicas before concluding the database is saturated. Monitor throttling and record effective resource requests after Autopilot admission. The master has a ClusterIP service on 5557 and 8089; headless mode does not start the UI. For interactive exploration remove `--headless`/headless-only arguments from a separate manifest and port-forward port 8089.
 
-### 5. Save GKE results to your local disk
+### 5. Save GKE results to GCS
 
-The default workflow stores results in `/results` inside the master pod. It does **not** upload to GCS unless you pass `--gcs-prefix`. After the benchmark finishes, copy the files to your computer before deleting the Job or pod. Run these commands on your local machine in the repository directory:
+For durable GKE results, include `--gcs-prefix "gs://YOUR_BUCKET/$TARGET/$SCENARIO"` when rendering the manifests in step 2. The bucket must exist, and the `mongo-bench/benchmark` Kubernetes service account must have object-write access through Workload Identity. For this cluster (`niko-feng`, project number `785680100598`), ask a bucket administrator to grant the service-account principal the bucket-scoped Object Creator role:
+
+```bash
+gcloud storage buckets add-iam-policy-binding gs://YOUR_BUCKET \
+  --member="principal://iam.googleapis.com/projects/785680100598/locations/global/workloadIdentityPools/niko-feng.svc.id.goog/subject/ns/mongo-bench/sa/benchmark" \
+  --role="roles/storage.objectCreator"
+```
+
+Replace `YOUR_BUCKET` with the bucket used by `--gcs-prefix`. If using another project or cluster, update the project number and Workload Identity pool in the principal. `roles/storage.objectCreator` allows creating new objects but not overwriting existing ones; render a fresh run (unique run ID) when retrying. The renderer appends a unique run ID to the prefix; render again for each run.
+
+The master first writes to `/results` inside its container, then uploads all artifacts after Locust exits, including when Locust exits nonzero. Check the master logs for `Uploaded ... artifact(s)` and verify the corresponding GCS objects before deleting the job. Download the run directory to your computer for the comparison report:
 
 ```bash
 mkdir -p "result/$TARGET/$SCENARIO"
-MASTER_POD=$(kubectl -n mongo-bench get pods -l app=locust-master \
-  -o jsonpath='{.items[0].metadata.name}')
-kubectl -n mongo-bench cp "$MASTER_POD:/results/." "result/$TARGET/$SCENARIO/"
+gcloud storage cp --recursive "gs://YOUR_BUCKET/$TARGET/$SCENARIO/RUN_ID/*" "result/$TARGET/$SCENARIO/"
 ```
 
-The files are now on your local disk under `result/<target>/<scenario>/`. Keep the completed master Job/pod until the copy succeeds. The `result/` folder is git-ignored to avoid committing benchmark artifacts. If you also want a cloud backup, optionally render the deployment with `--gcs-prefix gs://YOUR_BUCKET/PREFIX`; the GKE service account must have GCS write access.
+GCS is not configured by default. Without it, files remain in the master container's writable layer; `kubectl cp` generally cannot access a terminated container. Upload also cannot be guaranteed if the pod is killed before upload or GCS access fails. Configure persistent storage or an external collection mechanism if those failures must be recoverable.
 
 ## Comparison procedure
 
@@ -356,7 +369,7 @@ result/RUN_ID/
   locust.html
 ```
 
-Local runs save beneath `./result/` by default. GKE runs initially save beneath `/results` in the master pod; copy them to your local `result/<target>/<scenario>/` directory with `kubectl cp` after completion. GCS upload is optional and requires `--gcs-prefix`. Both `result/` and legacy `results/` output directories are git-ignored.
+Local runs save beneath `./result/` by default. GKE runs initially save beneath `/results` in the master pod; configure `--gcs-prefix` to upload the files after Locust exits, then download them to `result/<target>/<scenario>/`. Both `result/` and legacy `results/` output directories are git-ignored.
 
 ```bash
 python -m benchmark.report result/*/run-*.json --out result/summary.csv
@@ -370,7 +383,7 @@ python -m benchmark.report result/*/*/run-*.json --out result/summary.csv
 
 The report emits per-run CSV plus repeated-run median/min/max successful throughput and median ADT duration. It separates profile operations, incremental E2E operations, scheduler events, and component timings; it does not treat the sum of Locust request counts as business throughput. Worst per-operation p99 is reported rather than averaging percentiles. SLO evaluation applies the configured whole-measurement thresholds.
 
-`valid` means the measurement completed without framework/incomplete-batch errors. `slo_pass` separately evaluates errors, configured latency/batch limits, and arrival shedding/completion. Arrival counters are periodic in distributed mode, so examine boundary samples before making strict completion claims. A valid run can fail its SLO.
+`valid` means the measurement completed without framework/incomplete-batch errors, all measured workers sent final reports, and no measured operations were interrupted. The master waits for workers to stop and flush their stats before writing JSON; `final_worker_reports_complete`, `missing_final_workers`, and `interrupted_operations` record the outcome. `slo_pass` separately evaluates errors, configured latency/batch limits, and arrival shedding/completion. Interrupted operations can have unknown outcomes and are not counted as successful requests. A valid run can fail its SLO.
 
 Suggested presentation charts:
 

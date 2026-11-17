@@ -35,6 +35,10 @@ class Runtime:
         self.slots = {}
         self.counts = {"scheduled": 0, "started": 0, "completed": 0, "failed": 0, "dropped": 0}
         self.worker_counts = {}
+        self.worker_interruptions = {}
+        self.measurement_clients = None
+        self.final_workers = set()
+        self.final_reports_complete = not self.master
         self.assignment = {"rank": 0, "workers": 1}
         self.started_at = self.measurement_at = self.batch_started = self.batch_ended = None
         self.ledger = None
@@ -43,8 +47,11 @@ class Runtime:
         self.arrival_pool = Pool(cfg["load"]["max_inflight_per_worker"])
         for name, handler in (("bench_hello", self.on_hello), ("bench_init", self.on_init),
                               ("bench_claim", self.on_claim), ("bench_job", self.on_job),
-                              ("bench_heartbeat", self.on_heartbeat), ("bench_done", self.on_done)):
+                              ("bench_heartbeat", self.on_heartbeat), ("bench_done", self.on_done),
+                              ("bench_finalized", self.on_finalized)):
             self.runner.register_message(name, handler)
+        # Stopping users can block; do not block the worker's message listener.
+        self.runner.register_message("bench_finalize", self.on_finalize, concurrent=True)
 
     def send(self, name, data, target=None):
         if self.worker:
@@ -210,6 +217,7 @@ class Runtime:
         self.env.events.reset_stats.fire()
         last_snapshot = 0
         initial_clients = set(self.runner.clients) if self.master else {"local"}
+        self.measurement_clients = initial_clients
         self.worker_count = len(initial_clients)
         while not self.stopping:
             now = time.time()
@@ -245,11 +253,49 @@ class Runtime:
 
     def report(self, client_id, data, **kwargs):
         data["benchmark_arrivals"] = dict(self.counts)
+        data["benchmark_interrupted"] = getattr(self.work, "interrupted", 0)
 
     def receive_report(self, client_id, data, **kwargs):
         self.worker_counts[client_id] = data.get("benchmark_arrivals", {})
+        self.worker_interruptions[client_id] = data.get("benchmark_interrupted", 0)
+
+    def on_finalize(self, environment, msg, **kwargs):
+        if not self.worker or msg.data.get("run_id") != self.run_id:
+            return
+        # Stop users and background tasks before flushing Locust's remaining stats.
+        self.runner.stop()
+        # Locust 2.47 sends its incremental stats and report_to_master data here.
+        # The acknowledgement follows the stats on the same worker connection.
+        self.runner._send_stats()
+        self.send("bench_finalized", {"run_id": self.run_id})
+
+    def on_finalized(self, environment, msg, **kwargs):
+        if self.master and msg.data.get("run_id") == self.run_id:
+            self.final_workers.add(msg.node_id)
+
+    def finalize_workers(self):
+        expected = self.measurement_clients
+        if expected is None:
+            expected = set(self.runner.clients)
+        connected = set(self.runner.clients)
+        self.final_workers.clear()
+        for client_id in expected & connected:
+            self.send("bench_finalize", {"run_id": self.run_id}, client_id)
+        # Allow the configured user stop timeout plus time for network delivery.
+        deadline = time.monotonic() + (self.env.stop_timeout or 0) + 10
+        while expected - self.final_workers and time.monotonic() < deadline:
+            if (expected - self.final_workers) - set(self.runner.clients):
+                break
+            gevent.sleep(0.05)
+        missing = expected - self.final_workers
+        self.final_reports_complete = bool(expected) and not missing
+        if not self.final_reports_complete:
+            LOG.error("Missing final worker reports: %s", sorted(missing))
+            self.env.process_exit_code = self.env.process_exit_code or 2
+        return sorted(missing)
 
     def stop(self):
+        end = time.time()
         self.stopping = True
         gevent.killall(self.greenlets, block=True)
         self.arrival_pool.kill()
@@ -257,14 +303,18 @@ class Runtime:
             self.client.close()
         if not self.controller:
             return
-        end = time.time()
+        missing_workers = self.finalize_workers() if self.master else []
         duration = max(0, end - self.measurement_at)
         arrivals = dict(self.counts)
+        interrupted = getattr(self.work, "interrupted", 0)
         if self.master:
             arrivals = {k: sum(c.get(k, 0) for c in self.worker_counts.values()) for k in self.counts}
+            interrupted = sum(self.worker_interruptions.values())
+        if interrupted:
+            LOG.error("%d measured operation(s) interrupted; run invalid", interrupted)
         has_work = bool(self.ledger) or any(entry.num_requests for entry in self.env.stats.entries.values()
                                           if entry.method != "SCHEDULER")
-        valid = duration > 0 and has_work and not self.env.process_exit_code
+        valid = duration > 0 and has_work and not self.env.process_exit_code and not interrupted
         if self.ledger and (not self.ledger.done or self.ledger.failed):
             valid = False
         result = {"run_id": self.run_id, "label": self.cfg["label"], "config": self.cfg,
@@ -272,10 +322,13 @@ class Runtime:
                   "measurement_at": self.measurement_at, "ended_at": end,
                   "measurement_seconds": duration, "valid": valid,
                   "worker_count": getattr(self, "worker_count", None),
+                  "final_worker_reports_complete": self.final_reports_complete,
+                  "missing_final_workers": missing_workers,
+                  "interrupted_operations": interrupted,
                   "user_count": getattr(self.runner, "target_user_count", None),
                   "versions": {name: version(name) for name in ("pymongo", "locust")},
                   "operations": self.operation_stats(), "arrivals": arrivals,
-                  "arrival_counts_note": "Distributed counters are periodic reports; final in-flight work may be absent.",
+                  "arrival_counts_note": "Final worker counters are collected after shutdown; interrupted work may have an unknown outcome.",
                   "batch": self.ledger.summary() if self.ledger else None,
                   "batch_started_at": self.batch_started, "batch_ended_at": self.batch_ended,
                   "batch_seconds": (self.batch_ended - self.batch_started) if self.batch_ended and self.batch_started else None,

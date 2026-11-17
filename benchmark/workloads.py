@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from bson import Int64
 from bson.decimal128 import Decimal128
+from greenlet import GreenletExit
 from pymongo import UpdateOne
 
 from benchmark.adt import pipeline
@@ -16,6 +17,7 @@ class Workloads:
         self.cfg, self.db, self.events = cfg, db, events
         self.rng = random.Random(seed)
         self.run_id = run_id
+        self.interrupted = 0
         self.profiles = db[cfg["profiles"]]
         self.daily = db[cfg["daily"]]
         self.identities = db[cfg["identities"]]
@@ -25,15 +27,22 @@ class Workloads:
     def measured(self, name, function, request_type="MONGO"):
         start = time.perf_counter()
         error = None
+        cancelled = False
         try:
             return function()
+        except GreenletExit:
+            # A stopped greenlet may have an unknown database outcome, not a request failure.
+            cancelled = True
+            self.interrupted += 1
+            raise
         except BaseException as exc:
             error = exc
             raise
         finally:
-            self.events.request.fire(request_type=request_type, name=name,
-                                     response_time=(time.perf_counter() - start) * 1000,
-                                     response_length=0, exception=error)
+            if not cancelled:
+                self.events.request.fire(request_type=request_type, name=name,
+                                         response_time=(time.perf_counter() - start) * 1000,
+                                         response_length=0, exception=error)
 
     def player(self):
         cfg = self.cfg

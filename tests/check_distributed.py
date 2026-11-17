@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import gevent
+from locust import User, task
 from locust.env import Environment
 
 from benchmark.config import DEFAULTS
@@ -48,6 +49,12 @@ class Work:
         gevent.sleep(0.03)
 
 
+class IdleUser(User):
+    @task
+    def idle(self):
+        gevent.sleep(0.05)
+
+
 def main():
     cfg = copy.deepcopy(DEFAULTS)
     cfg.update(scenario="adt", players=23, warmup_seconds=0.3)
@@ -55,34 +62,50 @@ def main():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
-    master_env = Environment()
+    master_env = Environment(user_classes=[IdleUser])
     master = master_env.create_master_runner("127.0.0.1", port)
-    worker_envs = [Environment() for _ in range(2)]
+    worker_envs = [Environment(user_classes=[IdleUser]) for _ in range(2)]
     workers = [env.create_worker_runner("127.0.0.1", port) for env in worker_envs]
     runtimes = [Runtime(master_env, cfg)] + [Runtime(env, cfg) for env in worker_envs]
+    for env, runtime in zip([master_env] + worker_envs, runtimes):
+        env.events.test_start.add_listener(lambda environment, runtime=runtime, **kw: runtime.start())
+        env.events.test_stop.add_listener(lambda environment, runtime=runtime, **kw: runtime.stop())
+        if runtime.worker:
+            env.events.report_to_master.add_listener(runtime.report)
+
+            def final_event(environment, runtime=runtime, **kw):
+                # This sample exists only after the worker has stopped.
+                runtime.counts["completed"] = 42
+                environment.events.request.fire(request_type="MONGO", name="final.sample",
+                                                response_time=1, response_length=0, exception=None)
+
+            env.events.test_stop.add_listener(final_event)
+    master_env.events.worker_report.add_listener(runtimes[0].receive_report)
     with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, BENCH_RESULTS=directory), \
             patch("benchmark.runtime.connect", return_value=(Client(), None)), \
             patch("benchmark.runtime.Workloads", Work):
         gevent.sleep(0.2)
         assert len(master.clients) == 2
-        for runtime in runtimes:
-            runtime.start()
+        master.start(2, 20)
         with gevent.Timeout(10):
-            while not runtimes[0].batch_ended:
+            while not list(Path(directory).glob("run-*.json")):
                 gevent.sleep(0.05)
         ledger = runtimes[0].ledger
         assert ledger.done and not ledger.failed
         assert ledger.totals == {"patrons": 23, "daily_rows": 115, "profiles_written": 23}
         assert len(ledger.completed) == 5
-        for runtime in reversed(runtimes):
-            runtime.stop()
         result = json.loads(next(Path(directory).glob("run-*.json")).read_text())
         assert result["valid"] and result["worker_count"] == 2
+        assert result["missing_final_workers"] == []
+        assert result["final_worker_reports_complete"]
+        assert result["interrupted_operations"] == 0
+        assert result["arrivals"]["completed"] == 84
+        assert next(op for op in result["operations"] if op["name"] == "final.sample")["requests"] == 2
         assert result["batch"]["completed_jobs"] == 5
     for worker in workers:
         worker.quit()
     master.quit()
-    print("PASS: two real Locust workers completed five disjoint finite jobs; totals and artifact verified")
+    print("PASS: final worker stats and counters are included in the distributed artifact")
 
     # Arrival scheduler must expose overload rather than hide it in closed-loop throughput.
     env = Environment()
